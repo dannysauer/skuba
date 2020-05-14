@@ -183,6 +183,12 @@ spec:
       - name: oidc-dex
         image: {{.DexImage}}
         imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+              - all
+            add:
+              - NET_BIND_SERVICE
         command:
           - /usr/bin/caasp-dex
           - serve
