@@ -1,0 +1,53 @@
+on:
+  push:
+    tags:
+      - 'v*'
+
+name: Create Release
+
+jobs:
+  build:
+    name: Create Release
+    runs-on: ubuntu-latest # sorry
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Get Previous Tag
+        run: |
+          PREV_TAG=$(git describe --abbrev=0 --tags "${{ github.ref }}^")
+          echo "::set-env name=baseRef::$PREV_TAG"
+
+      - name: Generate changelog
+        run: |
+          # generates a file named changes in case that's useful as an artifact
+          PRETTY_TAG='${{ github.ref }}' # fix broken YAML hilighting with '
+          PRETTY_TAG=${PRETTY_TAG##*/}   # make "refs/tags/x" just "x"
+          {
+            echo "Update to version $PRETTY_TAG"
+            git log -s --cherry-pick --format="%w(77,2,12)* %h %s" \
+                       --no-merges ${{ env.baseRef }}..${{ github.ref }}
+          } > changes.md
+          echo "changes are:'$( <changes.md )'"
+          #echo "::set-output name=changelog::$( <changes.md )"
+          #echo "::set-env name=changes::$( <changes.md )"
+
+      - name: Save changelog artifact
+        uses: actions/upload-artifact@v2
+        with:
+            name: changelog
+            path: changes.md
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # token provided by Actions
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          body_path: changes.md
+          draft: false
+          prerelease: false
