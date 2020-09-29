@@ -3,43 +3,118 @@ on:
     tags:
       - 'v*'
 
-name: Create Release
+name: Release Skuba
 
 jobs:
-  build:
+  release:
     name: Create Release
-    runs-on: ubuntu-latest # sorry
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACT_PATH: artifacts/
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
         with:
+          # fetch-depth: 0 is necessary to get all history, which we need
           fetch-depth: 0
 
-      - name: Get Previous Tag
+      - name: Prep Artifacts Dir
+        run: |
+          mkdir -vp $ARTIFACT_PATH
+
+      - name: Identify Previous Release Tag
+        id: release_tag
         run: |
           PREV_TAG=$(git describe --abbrev=0 --tags "${{ github.ref }}^")
-          echo "::set-env name=baseRef::$PREV_TAG"
+          echo "::set-env name=prevTag::$PREV_TAG"
+          echo "::set-output name=prevTag::$PREV_TAG"
 
       - name: Generate changelog
+        id: gen_changelog
         run: |
-          # generates a file named changes in case that's useful as an artifact
+          CHANGELOG_PATH="changes.md"
+          OBS_CHANGELOG_PATH="$ARTIFACT_PATH/skuba.changes.append"
           PRETTY_TAG='${{ github.ref }}' # fix broken YAML hilighting with '
           PRETTY_TAG=${PRETTY_TAG##*/}   # make "refs/tags/x" just "x"
-          {
-            echo "Update to version $PRETTY_TAG"
-            git log -s --cherry-pick --format="%w(77,2,12)* %h %s" \
-                       --no-merges ${{ env.baseRef }}..${{ github.ref }}
-          } > changes.md
-          echo "changes are:'$( <changes.md )'"
-          #echo "::set-output name=changelog::$( <changes.md )"
-          #echo "::set-env name=changes::$( <changes.md )"
+          echo "::set-env name=PRETTY_TAG::$PRETTY_TAG"
 
+          # generate basic changelog for release body
+          {
+            echo "Update to $PRETTY_TAG:"
+            git log -s --cherry-pick --format="%w(77,2,12)* %h %s" \
+                       --no-merges ${prevTag}..${{ github.ref }}
+          } > "$CHANGELOG_PATH"
+
+          # add headers to make special OBS changes.append format
+          dashes=$( printf -- "-%.0s" {1..67} ) # why 67 hyphens? Who knows.
+          header="${dashes}%n%cd - %an <%ae>"
+          datef="%a %b %e %H:%M:%S %Z %Y"
+          git show \
+            --format="${header}%n%n- $(< $CHANGELOG_PATH )" \
+            --date="format-local:${datef}"  \
+            --no-patch "${{ github.ref }}^{commit}" \
+            > "$OBS_CHANGELOG_PATH"
+
+          echo "full changes are:'$( <$OBS_CHANGELOG_PATH )'"
+          echo "::set-output name=path::$CHANGELOG_PATH"
+          echo "::set-output name=obs_path::$OBS_CHANGELOG_PATH"
+
+      - name: Generate Release Tarball
+        id: gen_tarball
+        run: |
+          TARBALL_PATH=$ARTIFACT_PATH/skuba.tar.gz
+          PUB_NAME=skuba-${PRETTY_TAG}.tar.gz # cosmetic for the release
+          git archive --prefix=skuba/ -o "$TARBALL_PATH" ${{ github.ref }}
+          echo "::set-output name=path::$TARBALL_PATH"
+          echo "::set-output name=name::$( basename $TARBALL_PATH )"
+          echo "::set-output name=pubname::$PUB_NAME"
+
+      - name: Generate Specfile
+        id: gen_spec
+        run: |
+          SPECFILE_PATH=$ARTIFACT_PATH/skuba.spec
+          TEMPLATE_PATH=$GITHUB_WORKSPACE/ci/packaging/suse/skuba_spec_template
+          sed -e "
+            s|%%VERSION|${PRETTY_TAG#v}|;
+            s|%%TAG|${{ github.ref }}|;
+            s|%%CLOSEST_TAG|${{ github.ref }}|
+            " "$TEMPLATE_PATH" > "$SPECFILE_PATH"
+          echo "::set-output name=path::$SPECFILE_PATH"
+
+      - name: Generate OBS Files
+        id: gen_obs_files
+        run: |
+          TARBALL_PATH=obs.tar.gz
+          ( cd "$ARTIFACT_PATH" && tar cvzf - * ) > "$TARBALL_PATH"
+          echo "::set-output name=path::$TARBALL_PATH"
+          echo "::set-output name=name::$( basename $TARBALL_PATH )"
+
+      ##########################################
       - name: Save changelog artifact
         uses: actions/upload-artifact@v2
         with:
-            name: changelog
-            path: changes.md
+          name: changelog
+          path: ${{ steps.gen_changelog.outputs.obs_path }}
 
+      - name: Save release tarball artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: release_tarball
+          path: ${{ steps.gen_tarball.outputs.path }}
+
+      - name: Save specfile artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: release_specfile
+          path: ${{ steps.gen_spec.outputs.path }}
+
+      - name: Save obsfile artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: obs_files
+          path: ${{ steps.gen_obs_files.outputs.path }}
+
+      ##########################################
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -51,3 +126,25 @@ jobs:
           body_path: changes.md
           draft: false
           prerelease: false
+
+      - name: Add skuba tar file to release
+        id: release_skuba_tarball
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.gen_tarball.outputs.path }}
+          asset_name: ${{ steps.gen_tarball.outputs.pubname }}
+          asset_content_type: application/gzip
+
+      - name: Add OBS tar file to release
+        id: release_obs_tar
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.gen_obs_files.outputs.path }}
+          asset_name: ${{ steps.gen_obs_files.outputs.name }}
+          asset_content_type: application/gzip
