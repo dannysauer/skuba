@@ -1,6 +1,6 @@
 #!/bin/bash
 
-dashes="-------------------------------------------------------------------"
+dashes=$( printf -- "-%.0s" {1..67} ) # why 67 hyphens? Who knows.
 header="${dashes}%n%cd - %an <%ae>"
 datef="%a %b %e %H:%M:%S %Z %Y"
 changes=${1:-skuba.changes.append}
